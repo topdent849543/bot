@@ -183,7 +183,7 @@ def make_router(config: Config, db: Database) -> Router:
         else:
             next_spin = spin_count + 1
             assigned = await db.get_assigned_outcome(user_id, next_spin)
-            pending = "جاهزة" if assigned else "بانتظار تحديد الإدارة للنتيجة"
+            pending = "محددة من الإدارة" if assigned else "حظ أوفر (النتيجة الافتراضية)"
             text = (
                 "<b>🎡 دولاب الحظ</b>\n\n"
                 f"اللفّات المتبقية: <b>{remaining}</b> من 2\n"
@@ -191,10 +191,7 @@ def make_router(config: Config, db: Database) -> Router:
                 "اضغط على الزر عندما تكون مستعدًا."
             )
             buttons = []
-            if assigned:
-                buttons.append([InlineKeyboardButton(text="🎲 تدوير الدولاب الآن", callback_data="wheel:spin")])
-            else:
-                buttons.append([InlineKeyboardButton(text="🔄 تحديث الحالة", callback_data="nav:wheel")])
+            buttons.append([InlineKeyboardButton(text="🎲 تدوير الدولاب الآن", callback_data="wheel:spin")])
             buttons.append([InlineKeyboardButton(text="🏠 القائمة الرئيسية", callback_data="nav:home")])
             markup = InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -238,6 +235,7 @@ def make_router(config: Config, db: Database) -> Router:
                     InlineKeyboardButton(text="🎁 إدارة الجوائز", callback_data="adm:prizes"),
                 ],
                 [InlineKeyboardButton(text="👥 عرض المستخدمين", callback_data="adm:users:0")],
+                [InlineKeyboardButton(text="🆔 تحديد نتيجة عبر Telegram ID", callback_data="adm:set_by_id")],
                 [InlineKeyboardButton(text=status, callback_data="adm:toggle_new")],
                 [InlineKeyboardButton(text="📊 الإحصاءات", callback_data="adm:stats")],
                 [InlineKeyboardButton(text="🏠 القائمة الرئيسية", callback_data="nav:home")],
@@ -456,11 +454,6 @@ def make_router(config: Config, db: Database) -> Router:
             await callback.answer("استخدمت اللفتين المسموحتين.", show_alert=True)
             await show_wheel(callback, callback.from_user.id)
             return
-        if not await db.get_assigned_outcome(callback.from_user.id, current_count + 1):
-            await callback.answer("النتيجة لم تُحدد من الإدارة بعد.", show_alert=True)
-            await show_wheel(callback, callback.from_user.id)
-            return
-
         await callback.answer("يتم تدوير الدولاب...")
         if callback.message:
             await callback.message.edit_text(
@@ -699,6 +692,58 @@ def make_router(config: Config, db: Database) -> Router:
             InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ رجوع للإدارة", callback_data="adm:home")]]),
         )
 
+    @router.callback_query(F.data == "adm:set_by_id")
+    async def set_outcome_by_id_begin(callback: CallbackQuery, state: FSMContext) -> None:
+        if not await require_allowed_callback(callback) or not await admin_only_callback(callback):
+            return
+        await state.clear()
+        await state.set_state(AdminStates.target_user_id)
+        await send_or_edit(
+            callback,
+            "<b>🆔 تحديد نتيجة حسب Telegram ID</b>\n\n"
+            "أرسل الآن الرقم الرقمي لحساب Telegram.\n"
+            "يمكنك استخدام هذه الميزة حتى لو لم يفتح الشخص البوت بعد.\n\n"
+            "للإلغاء أرسل /cancel",
+        )
+
+    @router.message(AdminStates.target_user_id)
+    async def receive_target_user_id(message: Message, state: FSMContext) -> None:
+        if not await require_allowed_message(message) or not await admin_only_message(message):
+            return
+        raw_user_id = (message.text or "").strip()
+        if not raw_user_id.isdecimal() or int(raw_user_id) <= 0:
+            await message.answer("أرسل Telegram ID رقميًا موجبًا فقط، مثل <code>123456789</code>.")
+            return
+
+        user_id = int(raw_user_id)
+        user = await db.get_user(user_id)
+        count = await db.get_spin_count(user_id)
+        assigned1 = await db.get_assigned_outcome(user_id, 1)
+        assigned2 = await db.get_assigned_outcome(user_id, 2)
+        await state.clear()
+
+        name = (
+            escape(" ".join(part for part in [user["first_name"], user["last_name"]] if part).strip())
+            if user else "لم يبدأ البوت بعد"
+        )
+        status1 = "منفذة" if count >= 1 else ("محددة" if assigned1 else "حظ أوفر افتراضيًا")
+        status2 = "منفذة" if count >= 2 else ("محددة" if assigned2 else "حظ أوفر افتراضيًا")
+        buttons = []
+        if count < 1:
+            buttons.append([InlineKeyboardButton(text="🎯 حدّد نتيجة اللفة الأولى", callback_data=f"adm:assign:{user_id}:1")])
+        if count < 2:
+            buttons.append([InlineKeyboardButton(text="🎯 حدّد نتيجة اللفة الثانية", callback_data=f"adm:assign:{user_id}:2")])
+        buttons.append([InlineKeyboardButton(text="⬅️ رجوع للإدارة", callback_data="adm:home")])
+        await message.answer(
+            "<b>👤 إعداد نتيجة اللاعب</b>\n\n"
+            f"الاسم: <b>{name}</b>\n"
+            f"Telegram ID: <code>{user_id}</code>\n\n"
+            f"اللفة الأولى: <b>{status1}</b>\n"
+            f"اللفة الثانية: <b>{status2}</b>\n\n"
+            "النتيجة الافتراضية لأي لفة لم تحددها أنت هي «حظ أوفر».",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        )
+
     async def show_users(callback: CallbackQuery, page: int) -> None:
         users, total = await db.list_users(page=page)
         per_page = 8
@@ -739,16 +784,16 @@ def make_router(config: Config, db: Database) -> Router:
 
     async def show_user_card(callback: CallbackQuery, user_id: int) -> None:
         user = await db.get_user(user_id)
-        if not user:
-            await callback.answer("المستخدم غير موجود.", show_alert=True)
-            return
         count = await db.get_spin_count(user_id)
         assigned1 = await db.get_assigned_outcome(user_id, 1)
         assigned2 = await db.get_assigned_outcome(user_id, 2)
-        username = f"@{user['username']}" if user['username'] else "غير متاح"
-        name = escape(" ".join(part for part in [user['first_name'], user['last_name']] if part).strip() or "مستخدم")
-        spin1 = "منفذة ✅" if count >= 1 else ("محددة 🎯" if assigned1 else "غير محددة")
-        spin2 = "منفذة ✅" if count >= 2 else ("محددة 🎯" if assigned2 else "غير محددة")
+        username = f"@{user['username']}" if user and user['username'] else "غير متاح"
+        name = (
+            escape(" ".join(part for part in [user['first_name'], user['last_name']] if part).strip() or "مستخدم")
+            if user else "لم يبدأ البوت بعد"
+        )
+        spin1 = "منفذة ✅" if count >= 1 else ("محددة 🎯" if assigned1 else "حظ أوفر افتراضيًا")
+        spin2 = "منفذة ✅" if count >= 2 else ("محددة 🎯" if assigned2 else "حظ أوفر افتراضيًا")
         text = (
             "<b>👤 بيانات المستخدم</b>\n\n"
             f"الاسم: <b>{name}</b>\n"
@@ -757,6 +802,8 @@ def make_router(config: Config, db: Database) -> Router:
             f"اللفة الأولى: <b>{spin1}</b>\n"
             f"اللفة الثانية: <b>{spin2}</b>"
         )
+        if not user:
+            text += "\n\n<i>يمكنك تحديد النتيجة الآن؛ ستُستخدم عندما يبدأ الحساب البوت ويلف.</i>"
         buttons = []
         if count < 1:
             buttons.append([InlineKeyboardButton(text="🎯 حدّد نتيجة اللفة الأولى", callback_data=f"adm:assign:{user_id}:1")])

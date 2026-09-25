@@ -9,6 +9,9 @@ from typing import Any
 import aiosqlite
 
 
+DEFAULT_SPIN_MESSAGE = "🍀 حظ أوفر! نتمنى لك حظًا أفضل في المرة القادمة."
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
@@ -95,8 +98,7 @@ class Database:
                 message TEXT NOT NULL,
                 assigned_by INTEGER NOT NULL,
                 assigned_at TEXT NOT NULL,
-                PRIMARY KEY (user_id, spin_number),
-                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+                PRIMARY KEY (user_id, spin_number)
             );
 
             CREATE TABLE IF NOT EXISTS spin_history (
@@ -113,10 +115,41 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_spin_history_user ON spin_history(user_id);
             """
         )
+        await self._migrate_pending_outcomes(db)
         await db.execute(
             "INSERT OR IGNORE INTO settings(key, value) VALUES('new_users_blocked', '0')"
         )
         await db.commit()
+
+    async def _migrate_pending_outcomes(self, db: aiosqlite.Connection) -> None:
+        """Remove the legacy users FK so admins can pre-assign results by ID."""
+        foreign_keys = await (await db.execute("PRAGMA foreign_key_list(user_spin_outcomes)")).fetchall()
+        if not any(row["table"] == "users" for row in foreign_keys):
+            return
+
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            await db.execute("ALTER TABLE user_spin_outcomes RENAME TO user_spin_outcomes_legacy")
+            await db.execute(
+                """CREATE TABLE user_spin_outcomes (
+                    user_id INTEGER NOT NULL,
+                    spin_number INTEGER NOT NULL CHECK (spin_number IN (1, 2)),
+                    message TEXT NOT NULL,
+                    assigned_by INTEGER NOT NULL,
+                    assigned_at TEXT NOT NULL,
+                    PRIMARY KEY (user_id, spin_number)
+                )"""
+            )
+            await db.execute(
+                """INSERT INTO user_spin_outcomes(user_id, spin_number, message, assigned_by, assigned_at)
+                   SELECT user_id, spin_number, message, assigned_by, assigned_at
+                   FROM user_spin_outcomes_legacy"""
+            )
+            await db.execute("DROP TABLE user_spin_outcomes_legacy")
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
     async def get_setting(self, key: str, default: str = "") -> str:
         row = await (await self._db().execute(
@@ -257,12 +290,8 @@ class Database:
                     "SELECT message FROM user_spin_outcomes WHERE user_id = ? AND spin_number = ?",
                     (user_id, spin_number),
                 )).fetchone()
-                if not outcome:
-                    await db.rollback()
-                    return None
-
                 spun_at = utc_now()
-                message = str(outcome["message"])
+                message = str(outcome["message"]) if outcome else DEFAULT_SPIN_MESSAGE
                 await db.execute(
                     "INSERT INTO spin_history(user_id, spin_number, message, spun_at) VALUES(?, ?, ?, ?)",
                     (user_id, spin_number, message, spun_at),
