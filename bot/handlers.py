@@ -111,11 +111,19 @@ def make_router(config: Config, db: Database) -> Router:
         for task in tasks:
             task_id = int(task["id"])
             state = "✅ مكتملة" if task_id in completed else "🔵 غير مكتملة"
-            builder.button(
-                text=f"{state} — {task['title']}",
-                callback_data=f"task:detail:{task_id}",
+            builder.row(
+                InlineKeyboardButton(
+                    text=f"📣 {state} — {task['title']}",
+                    url=task["channel_url"],
+                )
             )
-        builder.adjust(1)
+            if task_id not in completed:
+                builder.row(
+                    InlineKeyboardButton(
+                        text="✅ سجّل تنفيذ المهمة",
+                        callback_data=f"task:complete:{task_id}",
+                    )
+                )
         builder.row(InlineKeyboardButton(text="🏠 القائمة الرئيسية", callback_data="nav:home"))
         return builder.as_markup()
 
@@ -133,7 +141,8 @@ def make_router(config: Config, db: Database) -> Router:
             text = (
                 "<b>🟦 قائمة المهام</b>\n\n"
                 f"التقدّم: <b>{done}/{total}</b>\n"
-                "اضغط على المهمة لعرض القناة وتنفيذها."
+                "اضغط على اسم المهمة لفتح القناة مباشرة. بعد الرجوع، اضغط «سجّل تنفيذ المهمة».\n"
+                "لا يتحقق البوت من الاشتراك بالقناة."
             )
             markup = task_list_markup(tasks, completed)
 
@@ -403,6 +412,34 @@ def make_router(config: Config, db: Database) -> Router:
         buttons.append([InlineKeyboardButton(text="🏠 القائمة الرئيسية", callback_data="nav:home")])
         if callback.message:
             await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+    @router.callback_query(F.data.startswith("task:complete:"))
+    async def task_complete_from_list(callback: CallbackQuery) -> None:
+        if not await require_allowed_callback(callback):
+            return
+        try:
+            task_id = int(callback.data.rsplit(":", 1)[1])
+        except (ValueError, AttributeError):
+            await callback.answer("تعذر قراءة المهمة.", show_alert=True)
+            return
+        task = await db.get_task(task_id)
+        if not task:
+            await callback.answer("هذه المهمة لم تعد متاحة.", show_alert=True)
+            return
+
+        newly_done = await db.complete_task(callback.from_user.id, task_id)
+        done, total = await db.task_progress(callback.from_user.id)
+        await callback.answer("تم تسجيل المهمة." if newly_done else "المهمة مسجلة بالفعل.")
+        text = (
+            f"<b>{'🎉 تم تسجيل تنفيذ المهمة!' if newly_done else '✅ المهمة مكتملة بالفعل.'}</b>\n\n"
+            f"المهمة: <b>{escape(task['title'])}</b>\n"
+            f"تقدمك: <b>{done}/{total}</b>\n\n"
+            "يمكنك فتح القناة مباشرة من زر اسم المهمة في القائمة."
+        )
+        buttons = [[InlineKeyboardButton(text="🟦 العودة للمهام", callback_data="nav:tasks")]]
+        if done == total:
+            buttons.insert(0, [InlineKeyboardButton(text="🎡 فتح دولاب الحظ", callback_data="nav:wheel")])
+        await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
     @router.callback_query(F.data == "wheel:spin")
     async def spin_wheel(callback: CallbackQuery) -> None:
