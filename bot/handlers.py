@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import math
+import re
 from html import escape
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
@@ -27,6 +28,30 @@ TASKS_LABEL = "🟦 المهام"
 WHEEL_LABEL = "🎡 دولاب الحظ"
 EARNINGS_LABEL = "💰 أرباحي"
 ADMIN_LABEL = "🛠 لوحة الأدمن"
+
+
+def normalize_telegram_channel_url(value: str) -> str | None:
+    """Accept Telegram handles and common t.me links, returning a canonical HTTPS URL."""
+    candidate = value.strip().strip("<>").strip()
+    if re.fullmatch(r"@[A-Za-z0-9_]{5,32}", candidate):
+        return f"https://t.me/{candidate[1:]}"
+
+    if candidate.startswith(("t.me/", "www.t.me/", "telegram.me/", "www.telegram.me/")):
+        candidate = f"https://{candidate}"
+    elif candidate.startswith("//"):
+        candidate = f"https:{candidate}"
+
+    parsed = urlparse(candidate)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme not in {"http", "https"} or host not in {
+        "t.me", "www.t.me", "telegram.me", "www.telegram.me"
+    }:
+        return None
+    if not parsed.path or parsed.path == "/" or any(ch.isspace() for ch in parsed.path):
+        return None
+
+    # Telegram accepts HTTPS t.me links for public channels and private invite links.
+    return urlunparse(("https", "t.me", parsed.path, "", parsed.query, ""))
 
 
 WELCOME_TEXT = (
@@ -222,10 +247,6 @@ def make_router(config: Config, db: Database) -> Router:
             await send_or_edit(message_or_callback, text, markup)
         else:
             await message_or_callback.answer(text, reply_markup=markup)
-
-    def is_valid_channel_url(value: str) -> bool:
-        parsed = urlparse(value.strip())
-        return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
     async def admin_only_callback(callback: CallbackQuery) -> bool:
         if not config.is_admin(callback.from_user.id):
@@ -469,8 +490,8 @@ def make_router(config: Config, db: Database) -> Router:
         await state.update_data(task_title=title)
         await state.set_state(AdminStates.task_url)
         await message.answer(
-            "أرسل رابط القناة الكامل الآن.\n"
-            "مثال: <code>https://t.me/your_channel</code>\n\n"
+            "أرسل رابط قناة Telegram الآن. يقبل الرابط الكامل أو المختصر أو اسم القناة.\n"
+            "أمثلة: <code>https://t.me/my_channel</code> أو <code>t.me/my_channel</code> أو <code>@my_channel</code>\n\n"
             "للإلغاء أرسل /cancel"
         )
 
@@ -478,9 +499,14 @@ def make_router(config: Config, db: Database) -> Router:
     async def receive_task_url(message: Message, state: FSMContext) -> None:
         if not await require_allowed_message(message) or not await admin_only_message(message):
             return
-        url = (message.text or "").strip()
-        if not is_valid_channel_url(url):
-            await message.answer("الرابط غير صحيح. أرسل رابطًا كاملاً يبدأ بـ https://")
+        raw_url = (message.text or "").strip()
+        url = normalize_telegram_channel_url(raw_url)
+        if not url:
+            await message.answer(
+                "ما قدرت أتعرف على رابط القناة. أرسل رابط Telegram مثل "
+                "<code>https://t.me/my_channel</code> أو <code>t.me/my_channel</code> "
+                "أو اسم المستخدم <code>@my_channel</code>."
+            )
             return
         data = await state.get_data()
         task_id = await db.add_task(data["task_title"], url)
