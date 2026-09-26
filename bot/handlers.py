@@ -181,14 +181,11 @@ def make_router(config: Config, db: Database) -> Router:
                 ]
             )
         else:
-            next_spin = spin_count + 1
-            assigned = await db.get_assigned_outcome(user_id, next_spin)
-            pending = "محددة من الإدارة" if assigned else "حظ أوفر (النتيجة الافتراضية)"
             text = (
                 "<b>🎡 دولاب الحظ</b>\n\n"
                 f"اللفّات المتبقية: <b>{remaining}</b> من 2\n"
-                f"حالة اللفة القادمة: <b>{pending}</b>\n\n"
-                "اضغط على الزر عندما تكون مستعدًا."
+                "استعد للفة القادمة واكتشف نتيجتك!\n\n"
+                "اضغط على الزر لبدء الدوران."
             )
             buttons = []
             buttons.append([InlineKeyboardButton(text="🎲 تدوير الدولاب الآن", callback_data="wheel:spin")])
